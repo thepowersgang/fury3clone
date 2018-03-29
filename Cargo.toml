@@ -1,0 +1,10 @@
+[package]
+name = "fury3clone"
+version = "0.1.0"
+authors = ["John Hodge <tpg@mutabah.net>"]
+
+[dependencies]
+amethyst = "0.6"
+byteorder = "1.0"
+log = "0.4"
+env_logger = "0.5"
