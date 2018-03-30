@@ -11,6 +11,12 @@ struct FileEnt
     offset: u32,
     size: u32,
 }
+impl ::std::fmt::Debug for FileEnt {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result
+    {
+        write!(f, "{:?}@{:#x}+{:#x}", &*self.name, self.offset, self.size)
+    }
+}
 
 impl PodArchive
 {
@@ -66,6 +72,69 @@ impl PodArchive
             size: self.files[idx].size,
             })
     }
+    pub fn open_dir_file<'s>(&'s mut self, dir: &str, file: &str) -> ::std::io::Result<FileHandle<'s>>
+    {
+        let dir = dir.as_bytes();
+        let file = file.as_bytes();
+        let mut ofs = 0;
+        let mut range = 0 .. self.files.len();
+
+        loop
+        {
+            let b = if ofs < dir.len() {
+                    dir[ofs]
+                }
+                else if ofs == dir.len() {
+                    b'\\'
+                }
+                else if ofs < dir.len() + 1 + file.len() {
+                    file[ofs - dir.len() - 1]
+                }
+                else {
+                    break;
+                };
+            //debug!("ofs = {}, range = {:?}, {:?}", ofs, range, &self.files[range.clone()]);
+            let i = match self.files[range.clone()].binary_search_by_key(&b, |v| *v.name.as_bytes().get(ofs).unwrap_or(&255))
+                {
+                Ok(i) => i,
+                Err(_) => {
+                    warn!("Not found at +{} '{}' - {:?} {:?} -- {:?}", ofs, b as char, range,
+                        &*self.files[range.start].name,
+                        &*self.files[range.end-1].name,
+                        );
+                    return Err(::std::io::Error::new(::std::io::ErrorKind::NotFound, ""))
+                    },
+                };
+            let mut s = range.start + i;
+            while s >= range.start && b == *self.files[s].name.as_bytes().get(ofs).unwrap_or(&255) {
+                s -= 1;
+            }
+            s += 1;
+            assert_eq!( b, self.files[s].name.as_bytes()[ofs] );
+            let mut e = range.start + i;
+            while e < range.end && b == *self.files[e].name.as_bytes().get(ofs).unwrap_or(&255) {
+                e += 1;
+            }
+            if e < range.end {
+                assert_eq!( b, self.files[e-1].name.as_bytes()[ofs] );
+            }
+
+            range = s .. e;
+            ofs += 1;
+        }
+        let idx = range.start;
+        if ofs != self.files[idx].name.as_bytes().len() {
+            return Err(::std::io::Error::new(::std::io::ErrorKind::NotFound, ""));
+        }
+        
+        use std::io::Seek;
+        self.file.seek(::std::io::SeekFrom::Start(self.files[idx].offset as u64))?;
+        Ok(FileHandle {
+            file: &mut self.file,
+            cur_pos: 0,
+            size: self.files[idx].size,
+            })
+    }
 }
 
 pub struct FileHandle<'a>
@@ -73,6 +142,12 @@ pub struct FileHandle<'a>
     file: &'a mut ::std::fs::File,
     cur_pos: u32,
     size: u32,
+}
+impl<'a> FileHandle<'a>
+{
+    pub fn size(&self) -> usize {
+        self.size as usize
+    }
 }
 impl<'a> ::std::io::Read for FileHandle<'a>
 {

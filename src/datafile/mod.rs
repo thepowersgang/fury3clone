@@ -3,6 +3,7 @@
 //!
 
 pub use self::pod_file::PodArchive;
+pub use self::pod_file::FileHandle;
 pub use self::model::Model;
 
 mod pod_file;
@@ -36,7 +37,12 @@ where
     fn as_bytes(&self) -> &[u8]
     {
         let src = self.as_bytes_with_nul();
-        &src[.. src.len()-1]
+        assert_eq!(src[src.len()-1], 0);
+        let rv = &src[.. src.len()-1];
+        for v in rv {
+            assert!(*v != 0);
+        }
+        rv
     }
     fn as_bytes_with_nul(&self) -> &[u8]
     {

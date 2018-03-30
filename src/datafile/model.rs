@@ -25,13 +25,15 @@ impl Model
         let _unk1 = file.read_u32::<LittleEndian>()?;
         let _unk2 = file.read_u32::<LittleEndian>()?;
         let num_vert = file.read_u32::<LittleEndian>()?;
+        debug!("Scale: {:#x}", scale);
 
+	    let fscale = scale as f32 / 0x80_0000 as f32;
         let mut vertices = Vec::new();
         for _ in 0 .. num_vert
         {
-            let x = scale as f32 / file.read_i32::<LittleEndian>()? as f32;
-            let y = scale as f32 / file.read_i32::<LittleEndian>()? as f32;
-            let z = scale as f32 / file.read_i32::<LittleEndian>()? as f32;
+            let x = file.read_i32::<LittleEndian>()? as f32 * fscale;
+            let y = file.read_i32::<LittleEndian>()? as f32 * fscale;
+            let z = file.read_i32::<LittleEndian>()? as f32 * fscale;
             vertices.push([x, y, z]);
         }
 
@@ -101,7 +103,8 @@ impl Model
                         normal: normal,
                         });
                     faces.push(Face {
-                        v: [fi[0], fi[3], fi[2]],
+                        // Ordering matters
+                        v: [fi[2], fi[3], fi[0]],
                         normal: normal,
                         });
                 }
@@ -114,7 +117,7 @@ impl Model
             0x17 => {
                 let _unk1 = file.read_u32::<LittleEndian>()?;
                 let _unk2 = file.read_u32::<LittleEndian>()?;
-                //debug!("")
+			    debug!("0x17: Unk - {:#x} {:#x}", _unk1, _unk2);
                 },
             _ => panic!("TODO: MTM block 0x{:02x}", block_id),
             }
