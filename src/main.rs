@@ -18,12 +18,14 @@ use amethyst::renderer as a_renderer;
 mod datafile;
 
 #[derive(Copy,Clone,Debug)]
+#[allow(dead_code)]
 enum PodName
 {
     Startup,
     Game,
 }
 #[derive(Copy,Clone,Debug)]
+#[allow(dead_code)]
 enum DataFolder
 {
     Art,
@@ -67,7 +69,7 @@ fn main_res() -> Result<(), Box<::std::error::Error>>
 {
     let pipe = ::amethyst::renderer::Pipeline::build().with_stage(
         ::amethyst::renderer::Stage::with_backbuffer()
-            .clear_target(Rgba(0.,0.,0.,0.), 1.0)
+            .clear_target(Rgba(0.,0.2,0.,0.), 1.0)
             .with_pass(::amethyst::renderer::DrawShadedSeparate::new()),
         );
     
@@ -171,7 +173,7 @@ impl GameRoot
     }
 
     fn load_level_material(&mut self, world: &mut World, list_file: DataPath, default_plt: DataPath)
-            -> Result< (a_renderer::Material, Vec<usize>), Box<::std::error::Error>>
+            -> Result< (a_renderer::Material, Vec<(usize, usize, usize)>), Box<::std::error::Error>>
     {   
         use ::std::io::Read;
 
@@ -194,8 +196,7 @@ impl GameRoot
             };
 
         // 1. Determine max texture size
-        let mut total_width = 0;
-        let mut max_height = 0;
+        // TODO: Pack the textures into an efficient format
         let mut sizes = Vec::new();
         for &name in &file_list
         {
@@ -203,15 +204,37 @@ impl GameRoot
             let dim = (size as f64).sqrt() as usize;
             assert_eq!(dim*dim, size);
             sizes.push(dim);
-            total_width += dim;
-            max_height = ::std::cmp::max(max_height, dim);
         }
+        let max_width = sizes.iter().cloned().max().unwrap();
+        //   - Check that all sizes are powers of two?
+        // - Pack into a strip, with the width being the max texture width.
+        let (subtex_coords, total_height) = {
+            // - Sort by size (remembering index)
+            let mut indexes: Vec<_> = (0.. sizes.len()).collect();
+            indexes.sort_by_key(|&v| sizes[v]);
+            let mut subtex_coords = vec![ (0,0,0); sizes.len() ];
+            let mut h = 0;
+            let mut x_space = 0;
+            for v in indexes
+            {
+                if x_space < sizes[v] {
+                    x_space = max_width;
+                    h += sizes[v];
+                }
+
+                subtex_coords[v] = (max_width - x_space, h - sizes[v], sizes[v]);
+
+                x_space -= sizes[v];
+            }
+            (subtex_coords, h)
+            };
+        debug!("load_level_texture: {} sources, total {}x{}", sizes.len(), max_width, total_height);
+        
         // 2. Create a maxheight by total_width texture (RGBA)
-        let pitch = total_width*4;
-        let mut tex_data = vec![ 0; max_height*pitch ];
+        let pitch = max_width*4;
+        let mut tex_data = vec![ 0; total_height*pitch ];
 
         // 3. Re-load every texture into the file.
-        let mut start_ofs = 0;
         for (i, &name) in file_list.iter().enumerate()
         {
             // Make a second version of the name that is .ACT instead of .RAW
@@ -231,9 +254,12 @@ impl GameRoot
             let mut fh = self.pods.open_file( datapath!(Game, Art, name) )?;
             let dim = (fh.size() as f64).sqrt() as usize;
 
-            let mut ofs = start_ofs;
-            debug!("load_level_texture: {} {:?} - ofs={:#x} dim={}", i, name, ofs, dim);
-
+            assert_eq!(subtex_coords[i].2, dim);
+            let mut ofs = subtex_coords[i].1 * pitch + subtex_coords[i].0 * 4;
+            debug!("load_level_texture: {} {:?} @ {},{}+{} - ofs={:#x} dim={}",
+                i, name,
+                subtex_coords[i].0, subtex_coords[i].1, subtex_coords[i].2,
+                ofs, dim);
             for _ in 0 .. dim
             {
                 //debug!("> ofs={:#x}", ofs);
@@ -255,32 +281,62 @@ impl GameRoot
                 ofs += pitch;
             }
             debug!("> ofs={:#x} / {:#x}", ofs, tex_data.len());
-            start_ofs += dim * 4;
         }
         debug!("Loaded texture set {:?} - {}KiB RGBA uncompressed", list_file, tex_data.len() / 1024);
+
+        if true
+        {
+            use std::io::Write;
+            use byteorder::{WriteBytesExt, LittleEndian};
+            let mut fh = ::std::fs::File::create("out.bmp")?;
+            fh.write(&[b'B', b'M'])?;
+            fh.write_u32::<LittleEndian>( (14+40+tex_data.len()) as u32 )?;   // Total size
+            fh.write_u16::<LittleEndian>(0)?;   // resvd
+            fh.write_u16::<LittleEndian>(0)?;   // resvd
+            fh.write_u32::<LittleEndian>(14+40)?;   // Pixel data ofs
+            fh.write_u32::<LittleEndian>(40)?;   // DIB header size
+            fh.write_u32::<LittleEndian>((pitch / 4) as u32)?;  // W
+            fh.write_u32::<LittleEndian>(total_height as u32)?; // H
+            fh.write_u16::<LittleEndian>(1)?;   // nplanes
+            fh.write_u16::<LittleEndian>(32)?;  // bpp
+            fh.write_u32::<LittleEndian>(0)?;   // compression
+            fh.write_u32::<LittleEndian>(0)?;   // size (can be zero)
+            fh.write_u32::<LittleEndian>(10000)?;   // hres
+            fh.write_u32::<LittleEndian>(10000)?;   // vres
+            fh.write_u32::<LittleEndian>(0)?;   // nimportant
+            fh.write_u32::<LittleEndian>(0)?;   // nimportant
+            fh.write(&tex_data)?;
+        }
 
         let loader = world.read_resource::<::amethyst::assets::Loader>();
         let tex = a_renderer::TextureData::U8(tex_data,
             a_renderer::TextureMetadata {
-                sampler: None,
+                sampler: Some(::gfx_core::texture::SamplerInfo::new(
+                    ::gfx_core::texture::FilterMethod::Bilinear,
+                    ::gfx_core::texture::WrapMode::Clamp,
+                    )),  // TODO: Add a sampler?
                 mip_levels: None,
-                size: Some(( (pitch/4) as u16, max_height as u16 )),
+                size: Some(( (pitch/4) as u16, total_height as u16 )),
                 dynamic: false,
                 format: Some(::gfx_core::format::SurfaceType::R8_G8_B8_A8),
                 channel: Some(::gfx_core::format::ChannelType::Uint),
                 }
             );
-        let tex = loader.load_from_data(tex, (), &world.read_resource());
+        let tex: a_renderer::TextureHandle = loader.load_from_data(tex, (), &world.read_resource());
 
         let mat_defaults = world.read_resource::<a_renderer::MaterialDefaults>();
 
         Ok( (a_renderer::Material {
             albedo: tex,
+            //albedo: {
+            //    let albedo = [0.5, 0.5, 0.5, 1.0].into();
+            //    loader.load_from_data(albedo, (), &world.read_resource())
+            //    },
             ..mat_defaults.0.clone()
-            }, sizes) )
+            }, subtex_coords) )
     }
 
-    fn load_heightmap(&mut self, world: &mut World, model_path: DataPath, texture_widths: &[usize]) -> Result<::amethyst::assets::Handle<a_renderer::Mesh>, Box<::std::error::Error>>
+    fn load_heightmap(&mut self, world: &mut World, model_path: DataPath, texture_widths: &[(usize,usize,usize)]) -> Result<::amethyst::assets::Handle<a_renderer::Mesh>, Box<::std::error::Error>>
     {
         use std::io::Read;
         let clr_fname = format!("{}CLR", &model_path.file[..model_path.file.len() - 3]);
@@ -327,7 +383,7 @@ impl GameRoot
                     triangle_verts.push( [(r  ) as f32 * xy_scale, cur_row [c-1] as f32 * h_scale, (c-1) as f32 * xy_scale] );
                 }
 
-                });
+                })?;
             triangle_verts
             };
         
@@ -335,31 +391,34 @@ impl GameRoot
         // - Load a massive texture from the flies listed in `LEVEL.TEX`
         // - Get indexes from `LEVEL.CLR`
         let tex_coords: Vec<a_renderer::Separate<a_renderer::TexCoord>> = {
-            let texwidth: usize = texture_widths.iter().cloned().sum();
+            let tex_width : usize = texture_widths.iter().map(|v| v.0+v.2).max().unwrap();
+            let tex_height: usize = texture_widths.iter().map(|v| v.1+v.2).max().unwrap();
+
             let mut tex_coords = Vec::with_capacity(triangle_verts.len());
             with_row_pairs(&mut self.pods, datapath!(Game, Data, &clr_fname), |_r, prev_row, _cur_row| {
                 for c in 1 .. prev_row.len()
                 {
                     let tex_id = prev_row[c-1] as usize;
-                    let ofs: usize = texture_widths[..tex_id].iter().cloned().sum();
-                    let base = ofs as f32 / texwidth as f32;
-                    let w = texture_widths[tex_id] as f32 / texwidth as f32;
-                    let h = 1.0;    // TODO.
+                    let base_u = texture_widths[tex_id].0 as f32 / tex_width as f32;
+                    let base_v = texture_widths[tex_id].1 as f32 / tex_height as f32;
+                    let w = texture_widths[tex_id].2 as f32 / tex_width as f32;
+                    let h = texture_widths[tex_id].2 as f32 / tex_height as f32;
                     // TopLeft, TopRight, BottomLeft
-                    tex_coords.push( a_renderer::Separate::new([base  , 0.0]) );
-                    tex_coords.push( a_renderer::Separate::new([base+w, 0.0]) );
-                    tex_coords.push( a_renderer::Separate::new([base  , h  ]) );
+                    tex_coords.push( a_renderer::Separate::new([base_u  , base_v  ]) );
+                    tex_coords.push( a_renderer::Separate::new([base_u+w, base_v  ]) );
+                    tex_coords.push( a_renderer::Separate::new([base_u  , base_v+h]) );
 
                     // TopRight, BottomRight, BottomLeft
-                    tex_coords.push( a_renderer::Separate::new([base+w, 0.0]) );
-                    tex_coords.push( a_renderer::Separate::new([base+w, h  ]) );
-                    tex_coords.push( a_renderer::Separate::new([base  , h  ]) );
+                    tex_coords.push( a_renderer::Separate::new([base_u+w, base_v  ]) );
+                    tex_coords.push( a_renderer::Separate::new([base_u+w, base_v+h]) );
+                    tex_coords.push( a_renderer::Separate::new([base_u  , base_v+h]) );
                 }
-                });
+                })?;
             tex_coords
             };
         let normals = triangle_verts.iter()
             .map(|_v| {
+                // TODO: Calculate a normal based on the surface.
                 a_renderer::Separate::new([ 0.0, 1.0, 0.0 ])
                 })
             .collect()
@@ -369,8 +428,8 @@ impl GameRoot
             triangle_verts.into_iter().map(|p| a_renderer::Separate::<a_renderer::Position>::new(p)).collect::<Vec<_>>(),
             None,   // Colours
             Some(tex_coords),   // Texture coords (needed)
-            Some(normals),   // TODO: Normals
-            None,   // TODO: Tangents
+            Some(normals),   // Normals
+            None,   // TODO: Tangents?
             ).into();
 
         let loader = world.read_resource::<::amethyst::assets::Loader>();
@@ -384,13 +443,12 @@ impl State for GameRoot
 {
     fn on_start(&mut self, world: &mut World)
     {
-
+        // Load a random model (untextured)
+        // DISABLED.
         if false
         {
-            // Add the first level as a model.
             //let model_path = datapath!(Game, Models, "LEAFSHIP.BIN");
             let model_path = datapath!(Game, Models, "EGYPT.BIN");
-            //let model_path = "DATA\\EGYPT.BIN";
             let (mesh, material) = self.load_model(world, model_path).unwrap();
             world.create_entity()
                 .with(Transform::default())
@@ -400,10 +458,10 @@ impl State for GameRoot
                 ;
         }
 
+        // Load the "EGYPT" level from heightmap with its texture set
         if true
         {
             let (mat, tex_scales) = self.load_level_material(world, datapath!(Game, Data, "EGYPT.TEX"), datapath!(Game, Art, "EGYPT.ACT")).expect("Loading level tex");
-            //let mat = self.load_blue_material(world);
             let mesh = self.load_heightmap(world, datapath!(Game, Data, "EGYPT.RAW"), &tex_scales).expect("Loading level");
             world.create_entity()
                 .with(Transform::default())
@@ -442,11 +500,11 @@ impl State for GameRoot
 /// This function adds an ambient light and a point light to the world.
 fn initialise_lights(world: &mut World)
 {
-    const AMBIENT_LIGHT_COLOUR: Rgba = Rgba(0.9, 0.3, 0.3, 1.0); // near-black
+    const AMBIENT_LIGHT_COLOUR: Rgba = Rgba(0.3, 0.3, 0.3, 1.0); // near-black
     const POINT_LIGHT_COLOUR: Rgba = Rgba(1.0, 1.0, 1.0, 1.0); // white
-    const LIGHT_POSITION: [f32; 3] = [2.0, 2.0, -2.0];
-    const LIGHT_RADIUS: f32 = 25.0;
-    const LIGHT_INTENSITY: f32 = 3.0;
+    const LIGHT_POSITION: [f32; 3] = [2.0, 12.0, -2.0];
+    const LIGHT_RADIUS: f32 = 128.0;
+    const LIGHT_INTENSITY: f32 = 50.0;
 
     // Add ambient light.
     world.add_resource(a_renderer::AmbientColor(AMBIENT_LIGHT_COLOUR));
