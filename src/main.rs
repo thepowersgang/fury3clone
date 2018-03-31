@@ -319,7 +319,7 @@ impl GameRoot
                 size: Some(( (pitch/4) as u16, total_height as u16 )),
                 dynamic: false,
                 format: Some(::gfx_core::format::SurfaceType::R8_G8_B8_A8),
-                channel: Some(::gfx_core::format::ChannelType::Uint),
+                channel: None,//Some(::gfx_core::format::ChannelType::Uint),
                 }
             );
         let tex: a_renderer::TextureHandle = loader.load_from_data(tex, (), &world.read_resource());
@@ -363,7 +363,7 @@ impl GameRoot
         }
 
         let triangle_verts = {
-            let h_scale = 8. / 256.;
+            let h_scale = 1. / 256.;
             let xy_scale = 1. / 8.;
 
             let mut triangle_verts = vec![];
@@ -404,14 +404,13 @@ impl GameRoot
                     let w = texture_widths[tex_id].2 as f32 / tex_width as f32;
                     let h = texture_widths[tex_id].2 as f32 / tex_height as f32;
                     // TopLeft, TopRight, BottomLeft
-                    tex_coords.push( a_renderer::Separate::new([base_u  , base_v  ]) );
-                    tex_coords.push( a_renderer::Separate::new([base_u+w, base_v  ]) );
-                    tex_coords.push( a_renderer::Separate::new([base_u  , base_v+h]) );
-
+                    tex_coords.push( a_renderer::Separate::new([base_u  , 1.0 - (base_v+h)]) );
+                    tex_coords.push( a_renderer::Separate::new([base_u+w, 1.0 - (base_v+h)]) );
+                    tex_coords.push( a_renderer::Separate::new([base_u  , 1.0 - (base_v  )]) );
                     // TopRight, BottomRight, BottomLeft
-                    tex_coords.push( a_renderer::Separate::new([base_u+w, base_v  ]) );
-                    tex_coords.push( a_renderer::Separate::new([base_u+w, base_v+h]) );
-                    tex_coords.push( a_renderer::Separate::new([base_u  , base_v+h]) );
+                    tex_coords.push( a_renderer::Separate::new([base_u+w, 1.0 - (base_v+h)]) );
+                    tex_coords.push( a_renderer::Separate::new([base_u+w, 1.0 - (base_v  )]) );
+                    tex_coords.push( a_renderer::Separate::new([base_u  , 1.0 - (base_v  )]) );
                 }
                 })?;
             tex_coords
@@ -534,6 +533,8 @@ fn initialise_camera(world: &mut World) {
 
 struct CameraMoveSystem
 {
+    x: f32,
+    y: f32,
     z: f32,
     tilt_deg: f32,
     angle_deg: f32,
@@ -543,9 +544,11 @@ impl CameraMoveSystem
     fn new() -> CameraMoveSystem
     {
         CameraMoveSystem {
+            x: 0.,
+            y: 5.0,
             z: 50.,
             tilt_deg: 0.,
-            angle_deg: 180.,
+            angle_deg: 0.,
             }
     }
 
@@ -553,9 +556,15 @@ impl CameraMoveSystem
     {
         use amethyst::core::cgmath::Matrix4;
         Matrix4::from_scale(1.)
-            * Matrix4::from_angle_x(Deg(self.tilt_deg))
+            * Matrix4::from_translation([self.x, self.y, self.z].into())
             * Matrix4::from_angle_y(Deg(self.angle_deg))
-            * Matrix4::from_translation([0.0, 5.0, self.z].into())
+            * Matrix4::from_angle_x(Deg(self.tilt_deg))
+    }
+
+    fn shift(&mut self, angle: f32, step: f32)
+    {
+        self.x += angle.to_radians().sin() * step;
+        self.z += angle.to_radians().cos() * step;
     }
 }
 impl<'s> ecs::System<'s> for CameraMoveSystem
@@ -572,17 +581,19 @@ impl<'s> ecs::System<'s> for CameraMoveSystem
         let mut update = false;
         for k in input.keys_that_are_down()
         {
+            const SPEED: f32 = 0.025;
+            const VSPEED: f32 = 0.01;
             match k
             {
             ::amethyst::renderer::VirtualKeyCode::Left => {
-                self.angle_deg -= 1.;
+                self.angle_deg += 1.;
                 if self.angle_deg <= -180. {
                     self.angle_deg += 360.;
                 }
                 update = true;
                 },
             ::amethyst::renderer::VirtualKeyCode::Right => {
-                self.angle_deg += 1.;
+                self.angle_deg -= 1.;
                 if self.angle_deg <= -180. {
                     self.angle_deg -= 360.;
                 }
@@ -591,23 +602,43 @@ impl<'s> ecs::System<'s> for CameraMoveSystem
             ::amethyst::renderer::VirtualKeyCode::Down => {
                 self.tilt_deg -= 1.;
                 if self.tilt_deg <= -90. {
-                    self.tilt_deg += 180.;
+                    self.tilt_deg = -90.;
                 }
                 update = true;
                 },
             ::amethyst::renderer::VirtualKeyCode::Up => {
                 self.tilt_deg += 1.;
-                if self.tilt_deg <= -90. {
-                    self.tilt_deg -= 180.;
+                if self.tilt_deg >= 90. {
+                    self.tilt_deg = 90.;
                 }
                 update = true;
                 },
             ::amethyst::renderer::VirtualKeyCode::W => {
-                self.z -= 1.0;
+                let a = self.angle_deg;
+                self.shift(a, -SPEED);
                 update = true;
                 },
             ::amethyst::renderer::VirtualKeyCode::S => {
-                self.z += 1.0;
+                let a = self.angle_deg - 180.;
+                self.shift(a, -SPEED);
+                update = true;
+                },
+            ::amethyst::renderer::VirtualKeyCode::A => {
+                let a = self.angle_deg - 90.;
+                self.shift(a, SPEED);
+                update = true;
+                },
+            ::amethyst::renderer::VirtualKeyCode::D => {
+                let a = self.angle_deg + 90.;
+                self.shift(a, SPEED);
+                update = true;
+                },
+            ::amethyst::renderer::VirtualKeyCode::R => {
+                self.y += VSPEED;
+                update = true;
+                },
+            ::amethyst::renderer::VirtualKeyCode::F => {
+                self.y -= VSPEED;
                 update = true;
                 },
             _ => {},
