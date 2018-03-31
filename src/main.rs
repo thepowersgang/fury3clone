@@ -3,6 +3,7 @@ extern crate byteorder;
 #[macro_use]
 extern crate log;
 extern crate env_logger;
+extern crate gfx_core;
 
 use amethyst::prelude::*;
 use amethyst::renderer::Rgba;
@@ -16,11 +17,13 @@ use amethyst::renderer as a_renderer;
 
 mod datafile;
 
+#[derive(Copy,Clone,Debug)]
 enum PodName
 {
     Startup,
     Game,
 }
+#[derive(Copy,Clone,Debug)]
 enum DataFolder
 {
     Art,
@@ -33,12 +36,17 @@ enum DataFolder
     Sound,
     Startup,
 }
+#[derive(Copy,Clone,Debug)]
 struct DataPath<'a>
 {
     archive: PodName,
     folder: DataFolder,
     file: &'a str,
 }
+macro_rules! datapath {
+    ($a:ident, $d:ident, $f:expr) => ( DataPath { archive: PodName::$a, folder: DataFolder::$d, file: $f, } );
+}
+
 
 struct GameRoot
 {
@@ -113,6 +121,21 @@ impl PodFiles
 
 impl GameRoot
 {
+    fn load_blue_material(&mut self, world: &mut World) -> a_renderer::Material
+    {
+        // Colour/material
+        let tex_storage = world.read_resource();
+        let mat_defaults = world.read_resource::<a_renderer::MaterialDefaults>();
+
+        let loader = world.read_resource::<::amethyst::assets::Loader>();
+        let albedo = [0.0, 0.0, 1.0, 1.0].into();
+        let albedo = loader.load_from_data(albedo, (), &tex_storage);
+        a_renderer::Material {
+            albedo,
+            ..mat_defaults.0.clone()
+            }
+    }
+
     fn load_model(&mut self, world: &mut World, model_path: DataPath) -> Result<(::amethyst::assets::Handle<a_renderer::Mesh>, a_renderer::Material), Box<::std::error::Error>>
     {
         let m = datafile::Model::from_bin_file( self.pods.open_file(model_path)? )?;
@@ -130,75 +153,213 @@ impl GameRoot
                 })
             .collect();
 
-        let loader = world.read_resource::<::amethyst::assets::Loader>();
-        let m2: a_renderer::ComboMeshCreator = (
-            vertices_as_arrays.into_iter().map(|p| a_renderer::Separate::<a_renderer::Position>::new(p)).collect::<Vec<_>>(),
-            None,   // TODO: Colours
-            Some(tex_coords),   // Texture coords (needed)
-            Some(normals),   // TODO: Normals
-            None,   // TODO: Tangents
-            ).into();
-        let mesh: ::amethyst::assets::Handle<a_renderer::Mesh> = loader.load_from_data(m2.into(), (), &world.read_resource());
-
-        // Colour/material
-        let tex_storage = world.read_resource();
-        let mat_defaults = world.read_resource::<a_renderer::MaterialDefaults>();
-
-        let albedo = [0.0, 0.0, 1.0, 1.0].into();
-        let albedo = loader.load_from_data(albedo, (), &tex_storage);
-        let mat = a_renderer::Material {
-            albedo,
-            ..mat_defaults.0.clone()
+        let mesh: ::amethyst::assets::Handle<a_renderer::Mesh> = {
+            let loader = world.read_resource::<::amethyst::assets::Loader>();
+            let m2: a_renderer::ComboMeshCreator = (
+                vertices_as_arrays.into_iter().map(|p| a_renderer::Separate::<a_renderer::Position>::new(p)).collect::<Vec<_>>(),
+                None,   // TODO: Colours
+                Some(tex_coords),   // Texture coords (needed)
+                Some(normals),   // TODO: Normals
+                None,   // TODO: Tangents
+                ).into();
+            loader.load_from_data(m2.into(), (), &world.read_resource())
             };
+
+        let mat = self.load_blue_material(world);
 
         Ok( (mesh, mat) )
     }
 
-    fn load_heightmap(&mut self, world: &mut World, model_path: DataPath) -> Result<(::amethyst::assets::Handle<a_renderer::Mesh>, a_renderer::Material), Box<::std::error::Error>>
+    fn load_level_material(&mut self, world: &mut World, list_file: DataPath, default_plt: DataPath)
+            -> Result< (a_renderer::Material, Vec<usize>), Box<::std::error::Error>>
+    {   
+        use ::std::io::Read;
+
+        let mut file_list_data = String::new();
+        let file_list: Vec<&str> = {
+            let mut list_file = self.pods.open_file(list_file)?;
+            list_file.read_to_string(&mut file_list_data)?;
+            let mut it = file_list_data.split("\r\n");
+            let _count = it.next();
+            let mut v: Vec<_> = it.collect();
+            v.pop();
+            v
+            };
+
+        let default_plt = {
+            let mut fh = self.pods.open_file( default_plt )?;
+            let mut rv = vec![0; 256*3];
+            fh.read(&mut rv)?;
+            rv
+            };
+
+        // 1. Determine max texture size
+        let mut total_width = 0;
+        let mut max_height = 0;
+        let mut sizes = Vec::new();
+        for &name in &file_list
+        {
+            let size = self.pods.open_file( datapath!(Game, Art, name) )?.size();
+            let dim = (size as f64).sqrt() as usize;
+            assert_eq!(dim*dim, size);
+            sizes.push(dim);
+            total_width += dim;
+            max_height = ::std::cmp::max(max_height, dim);
+        }
+        // 2. Create a maxheight by total_width texture (RGBA)
+        let pitch = total_width*4;
+        let mut tex_data = vec![ 0; max_height*pitch ];
+
+        // 3. Re-load every texture into the file.
+        let mut start_ofs = 0;
+        for (i, &name) in file_list.iter().enumerate()
+        {
+            // Make a second version of the name that is .ACT instead of .RAW
+            let self_plt;
+            let palette = {
+                    let act_fname = format!("{}ACT", &name[..name.len() - 3]);
+                    if let Ok(mut fh) = self.pods.open_file( datapath!(Game, Art, &act_fname) ) {
+                        let mut rv = vec![0; 256*3];
+                        fh.read(&mut rv)?;
+                        self_plt = rv;
+                        &self_plt
+                    }
+                    else {
+                        &default_plt
+                    }
+                };
+            let mut fh = self.pods.open_file( datapath!(Game, Art, name) )?;
+            let dim = (fh.size() as f64).sqrt() as usize;
+
+            let mut ofs = start_ofs;
+            debug!("load_level_texture: {} {:?} - ofs={:#x} dim={}", i, name, ofs, dim);
+
+            for _ in 0 .. dim
+            {
+                //debug!("> ofs={:#x}", ofs);
+                let dst = &mut tex_data[ofs ..][.. dim*4];
+
+                for x in 0 .. dim
+                {
+                    let b = {
+                        let mut b = [0];
+                        fh.read(&mut b)?;
+                        b[0]
+                        };
+                    dst[x*4 + 0] = palette[b as usize * 3 + 0];
+                    dst[x*4 + 1] = palette[b as usize * 3 + 1];
+                    dst[x*4 + 2] = palette[b as usize * 3 + 2];
+                    dst[x*4 + 3] = 255;
+                }
+
+                ofs += pitch;
+            }
+            debug!("> ofs={:#x} / {:#x}", ofs, tex_data.len());
+            start_ofs += dim * 4;
+        }
+        debug!("Loaded texture set {:?} - {}KiB RGBA uncompressed", list_file, tex_data.len() / 1024);
+
+        let loader = world.read_resource::<::amethyst::assets::Loader>();
+        let tex = a_renderer::TextureData::U8(tex_data,
+            a_renderer::TextureMetadata {
+                sampler: None,
+                mip_levels: None,
+                size: Some(( (pitch/4) as u16, max_height as u16 )),
+                dynamic: false,
+                format: Some(::gfx_core::format::SurfaceType::R8_G8_B8_A8),
+                channel: Some(::gfx_core::format::ChannelType::Uint),
+                }
+            );
+        let tex = loader.load_from_data(tex, (), &world.read_resource());
+
+        let mat_defaults = world.read_resource::<a_renderer::MaterialDefaults>();
+
+        Ok( (a_renderer::Material {
+            albedo: tex,
+            ..mat_defaults.0.clone()
+            }, sizes) )
+    }
+
+    fn load_heightmap(&mut self, world: &mut World, model_path: DataPath, texture_widths: &[usize]) -> Result<::amethyst::assets::Handle<a_renderer::Mesh>, Box<::std::error::Error>>
     {
         use std::io::Read;
+        let clr_fname = format!("{}CLR", &model_path.file[..model_path.file.len() - 3]);
 
-        let mut file = self.pods.open_file(model_path)?;
-        assert!(file.size().is_power_of_two(), "Heightmap size {} is not a power of two", file.size());
-        let dim = 1 << ( (file.size().trailing_zeros() + 1) / 2 );
-        
-        let h_scale = 8. / 256.;
-        let xy_scale = 1./8.;
-
-        let mut prev_row = vec![0u8; dim];
-        let mut cur_row = vec![0u8; dim];
-        file.read(&mut cur_row)?;
-        let mut triangle_verts = vec![];
-        // For each row (except the first)
-        for r in 1 .. dim
+        fn with_row_pairs<F>(pods: &mut PodFiles, p: DataPath, mut cb: F) -> ::std::io::Result<()>
+        where
+            F: FnMut(usize, &[u8], &[u8])
         {
-            ::std::mem::swap(&mut prev_row, &mut cur_row);
-            file.read(&mut cur_row)?;
+            let mut file = pods.open_file(p)?;
+            let dim = (file.size() as f64).sqrt() as usize;
+            assert_eq!(dim*dim, file.size());
 
-            // Make triangles for each quad.
-            for c in 1 .. dim
+            let mut prev_row = vec![0u8; dim];
+            let mut cur_row = vec![0u8; dim];
+            file.read(&mut cur_row)?;
+            for r in 1 .. dim
             {
-                triangle_verts.push( [(r-1) as f32 * xy_scale, prev_row[c-1] as f32 * h_scale, (c-1) as f32 * xy_scale] );
-                triangle_verts.push( [(r-1) as f32 * xy_scale, prev_row[c  ] as f32 * h_scale, (c  ) as f32 * xy_scale] );
-                triangle_verts.push( [(r  ) as f32 * xy_scale, cur_row [c-1] as f32 * h_scale, (c-1) as f32 * xy_scale] );
-                
-                triangle_verts.push( [(r  ) as f32 * xy_scale, prev_row[c  ] as f32 * h_scale, (c  ) as f32 * xy_scale] );
-                triangle_verts.push( [(r  ) as f32 * xy_scale, cur_row [c-1] as f32 * h_scale, (c-1) as f32 * xy_scale] );
-                triangle_verts.push( [(r-1) as f32 * xy_scale, prev_row[c  ] as f32 * h_scale, (c  ) as f32 * xy_scale] );
+                ::std::mem::swap(&mut prev_row, &mut cur_row);
+                file.read(&mut cur_row)?;
+
+                cb(r, &prev_row, &cur_row);
             }
+            Ok( () )
         }
+
+        let triangle_verts = {
+            let h_scale = 8. / 256.;
+            let xy_scale = 1. / 8.;
+
+            let mut triangle_verts = vec![];
+            with_row_pairs(&mut self.pods, model_path, |r, prev_row, cur_row| {
+                assert_eq!( prev_row.len(), cur_row.len() );
+                // Make triangles for each quad.
+                for c in 1 .. prev_row.len()
+                {
+                    // TopLeft, TopRight, BottomLeft
+                    triangle_verts.push( [(r-1) as f32 * xy_scale, prev_row[c-1] as f32 * h_scale, (c-1) as f32 * xy_scale] );
+                    triangle_verts.push( [(r-1) as f32 * xy_scale, prev_row[c  ] as f32 * h_scale, (c  ) as f32 * xy_scale] );
+                    triangle_verts.push( [(r  ) as f32 * xy_scale, cur_row [c-1] as f32 * h_scale, (c-1) as f32 * xy_scale] );
+                    
+                    // TopRight, BottomRight, BottomLeft
+                    triangle_verts.push( [(r-1) as f32 * xy_scale, prev_row[c  ] as f32 * h_scale, (c  ) as f32 * xy_scale] );
+                    triangle_verts.push( [(r  ) as f32 * xy_scale, cur_row [c  ] as f32 * h_scale, (c  ) as f32 * xy_scale] );
+                    triangle_verts.push( [(r  ) as f32 * xy_scale, cur_row [c-1] as f32 * h_scale, (c-1) as f32 * xy_scale] );
+                }
+
+                });
+            triangle_verts
+            };
         
         // TODO: Textures
-        let tex_coords = triangle_verts.iter().map(|_| a_renderer::Separate::<a_renderer::TexCoord>::new([0.1,0.1])).collect();
-        let colours = triangle_verts.iter()
-            .map(|v| {
-                let i = v[1] / h_scale / 256.;
-                a_renderer::Separate::new([ i, i, i, 1.0 ])
-                })
-            .collect()
-            ;
+        // - Load a massive texture from the flies listed in `LEVEL.TEX`
+        // - Get indexes from `LEVEL.CLR`
+        let tex_coords: Vec<a_renderer::Separate<a_renderer::TexCoord>> = {
+            let texwidth: usize = texture_widths.iter().cloned().sum();
+            let mut tex_coords = Vec::with_capacity(triangle_verts.len());
+            with_row_pairs(&mut self.pods, datapath!(Game, Data, &clr_fname), |_r, prev_row, _cur_row| {
+                for c in 1 .. prev_row.len()
+                {
+                    let tex_id = prev_row[c-1] as usize;
+                    let ofs: usize = texture_widths[..tex_id].iter().cloned().sum();
+                    let base = ofs as f32 / texwidth as f32;
+                    let w = texture_widths[tex_id] as f32 / texwidth as f32;
+                    let h = 1.0;    // TODO.
+                    // TopLeft, TopRight, BottomLeft
+                    tex_coords.push( a_renderer::Separate::new([base  , 0.0]) );
+                    tex_coords.push( a_renderer::Separate::new([base+w, 0.0]) );
+                    tex_coords.push( a_renderer::Separate::new([base  , h  ]) );
+
+                    // TopRight, BottomRight, BottomLeft
+                    tex_coords.push( a_renderer::Separate::new([base+w, 0.0]) );
+                    tex_coords.push( a_renderer::Separate::new([base+w, h  ]) );
+                    tex_coords.push( a_renderer::Separate::new([base  , h  ]) );
+                }
+                });
+            tex_coords
+            };
         let normals = triangle_verts.iter()
-            .map(|v| {
+            .map(|_v| {
                 a_renderer::Separate::new([ 0.0, 1.0, 0.0 ])
                 })
             .collect()
@@ -206,7 +367,7 @@ impl GameRoot
 
         let m2: a_renderer::ComboMeshCreator = (
             triangle_verts.into_iter().map(|p| a_renderer::Separate::<a_renderer::Position>::new(p)).collect::<Vec<_>>(),
-            Some(colours),   // Colours
+            None,   // Colours
             Some(tex_coords),   // Texture coords (needed)
             Some(normals),   // TODO: Normals
             None,   // TODO: Tangents
@@ -215,18 +376,7 @@ impl GameRoot
         let loader = world.read_resource::<::amethyst::assets::Loader>();
         let mesh: ::amethyst::assets::Handle<a_renderer::Mesh> = loader.load_from_data(m2.into(), (), &world.read_resource());
 
-        //panic!("TODO: Heightmap size {}x{}", dim, dim);
-        let tex_storage = world.read_resource();
-        let mat_defaults = world.read_resource::<a_renderer::MaterialDefaults>();
-
-        let albedo = [0.0, 0.0, 1.0, 1.0].into();
-        let albedo = loader.load_from_data(albedo, (), &tex_storage);
-        let mat = a_renderer::Material {
-            albedo,
-            ..mat_defaults.0.clone()
-            };
-
-        Ok( (mesh, mat) )
+        Ok( mesh )
     }
 }
 
@@ -234,10 +384,6 @@ impl State for GameRoot
 {
     fn on_start(&mut self, world: &mut World)
     {
-        macro_rules! datapath {
-            ($a:ident, $d:ident, $f:expr) => ( DataPath { archive: PodName::$a, folder: DataFolder::$d, file: $f, } );
-        }
-        
 
         if false
         {
@@ -254,8 +400,11 @@ impl State for GameRoot
                 ;
         }
 
+        if true
         {
-            let (mesh, mat) = self.load_heightmap(world, datapath!(Game, Data, "EGYPT.RAW")).expect("Loading level");
+            let (mat, tex_scales) = self.load_level_material(world, datapath!(Game, Data, "EGYPT.TEX"), datapath!(Game, Art, "EGYPT.ACT")).expect("Loading level tex");
+            //let mat = self.load_blue_material(world);
+            let mesh = self.load_heightmap(world, datapath!(Game, Data, "EGYPT.RAW"), &tex_scales).expect("Loading level");
             world.create_entity()
                 .with(Transform::default())
                 .with(mesh)

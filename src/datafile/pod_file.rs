@@ -74,6 +74,7 @@ impl PodArchive
     }
     pub fn open_dir_file<'s>(&'s mut self, dir: &str, file: &str) -> ::std::io::Result<FileHandle<'s>>
     {
+        debug!("open_dir_file({:?}, {:?})", dir, file);
         let dir = dir.as_bytes();
         let file = file.as_bytes();
         let mut ofs = 0;
@@ -106,10 +107,12 @@ impl PodArchive
                     },
                 };
             let mut s = range.start + i;
-            while s >= range.start && b == *self.files[s].name.as_bytes().get(ofs).unwrap_or(&255) {
+            while s > 0 && s >= range.start && b == *self.files[s].name.as_bytes().get(ofs).unwrap_or(&255) {
                 s -= 1;
             }
-            s += 1;
+            if s > 0 {
+                s += 1;
+            }
             assert_eq!( b, self.files[s].name.as_bytes()[ofs] );
             let mut e = range.start + i;
             while e < range.end && b == *self.files[e].name.as_bytes().get(ofs).unwrap_or(&255) {
