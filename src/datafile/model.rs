@@ -17,7 +17,12 @@ impl Model
         use byteorder::LittleEndian;
 
         let id = file.read_u32::<LittleEndian>()?;
+        if id == 0x20 {
+            // TODO: return a special error that indicates that it's a animation file, not a model.
+            return Ok(Model { vertices: vec![ [0.; 3]], faces: vec![Face { v: [0,0,0], normal: [0.; 3] }] });
+        }
         if id != 0x14 {
+            warn!(".BIN file ID not 0x14, instead {:#x}", id);
             return Err(::std::io::Error::new(::std::io::ErrorKind::InvalidData, "File ID not 0x14"))
         }
 
@@ -51,6 +56,11 @@ impl Model
             0x00 => {
                 debug!("0x00: EOF");
                 },
+            // Color block (sets the current color)
+            0x0A => {
+                let bgra = file.read_u32::<LittleEndian>()?;
+                debug!("0x0A: bgra={:06x}", bgra);
+                },
             // Texture Block (sets the current texture)
             0x0D => {
                 let _unk1 = file.read_u32::<LittleEndian>()?;
@@ -64,7 +74,7 @@ impl Model
                 let normal_y = file.read_i32::<LittleEndian>()?;
                 let normal_z = file.read_i32::<LittleEndian>()?;
                 let _magic = file.read_u32::<LittleEndian>()?;
-                //debug!("0x00: EOF");
+                debug!("0x{:2x}: Faces ({} pts)", block_id, nvert);
 
                 let normal = [
                     normal_x as f32 / 65535.0,
@@ -80,6 +90,10 @@ impl Model
                         let idx = file.read_u32::<LittleEndian>()?;
                         let _tex_u = file.read_u32::<LittleEndian>()?;
                         let _tex_v = file.read_u32::<LittleEndian>()?;
+                        if !(idx < num_vert) {
+                            error!("Vertex index {} out of range (max {})", idx, num_vert);
+                            continue ;
+                        }
                         *slot = idx as usize;
                     }
                     faces.push(Face {
@@ -95,6 +109,68 @@ impl Model
                         let idx = file.read_u32::<LittleEndian>()?;
                         let _tex_u = file.read_u32::<LittleEndian>()?;
                         let _tex_v = file.read_u32::<LittleEndian>()?;
+                        if !(idx < num_vert) {
+                            error!("Vertex index {} out of range (max {})", idx, num_vert);
+                            continue ;
+                        }
+                        *slot = idx as usize;
+                    }
+
+                    faces.push(Face {
+                        v: [fi[0], fi[1], fi[2]],
+                        normal: normal,
+                        });
+                    faces.push(Face {
+                        // Ordering matters
+                        v: [fi[2], fi[3], fi[0]],
+                        normal: normal,
+                        });
+                }
+                else
+                {
+                    panic!("TODO: Strange number of points in face - {}", nvert);
+                }
+                },
+            // Special faces
+            0x19 => {
+                let nvert = file.read_u32::<LittleEndian>()?;
+                let normal_x = file.read_i32::<LittleEndian>()?;
+                let normal_y = file.read_i32::<LittleEndian>()?;
+                let normal_z = file.read_i32::<LittleEndian>()?;
+                let _magic = file.read_u32::<LittleEndian>()?;
+                debug!("0x{:2x}: Faces ({} pts)", block_id, nvert);
+
+                let normal = [
+                    normal_x as f32 / 65535.0,
+                    normal_y as f32 / 65535.0,
+                    normal_z as f32 / 65535.0,
+                    ];
+                
+                if nvert == 3
+                {
+                    let mut face_indexes = [0,0,0];
+                    for slot in face_indexes.iter_mut()
+                    {
+                        let idx = file.read_u32::<LittleEndian>()?;
+                        if !(idx < num_vert) {
+                            panic!("Vertex index {} out of range (max {})", idx, num_vert);
+                        }
+                        *slot = idx as usize;
+                    }
+                    faces.push(Face {
+                        v: face_indexes,
+                        normal: normal,
+                        });
+                }
+                else if nvert == 4
+                {
+                    let mut fi = [0,0,0,0];
+                    for slot in fi.iter_mut()
+                    {
+                        let idx = file.read_u32::<LittleEndian>()?;
+                        if !(idx < num_vert) {
+                            panic!("Vertex index {} out of range (max {})", idx, num_vert);
+                        }
                         *slot = idx as usize;
                     }
 
@@ -119,7 +195,20 @@ impl Model
                 let _unk2 = file.read_u32::<LittleEndian>()?;
 			    debug!("0x17: Unk - {:#x} {:#x}", _unk1, _unk2);
                 },
-            _ => panic!("TODO: MTM block 0x{:02x}", block_id),
+            _ => {
+                error!("Unexpected block ID 0x{:02x}", block_id);
+                for i in 0 .. 8
+                {
+                    let word = match file.read_u32::<LittleEndian>()
+                        {
+                        Ok(v) => v,
+                        Err(ref e) if e.kind() == ::std::io::ErrorKind::UnexpectedEof => break,
+                        Err(e) => return Err(e.into()),
+                        };
+                    debug!("+{} {:08x}", i, word);
+                }
+                panic!("TODO: MTM block 0x{:02x}", block_id)
+                },
             }
         }
 

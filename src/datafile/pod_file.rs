@@ -83,13 +83,13 @@ impl PodArchive
         loop
         {
             let b = if ofs < dir.len() {
-                    dir[ofs]
+                    dir[ofs].to_ascii_uppercase()
                 }
                 else if ofs == dir.len() {
                     b'\\'
                 }
                 else if ofs < dir.len() + 1 + file.len() {
-                    file[ofs - dir.len() - 1]
+                    file[ofs - dir.len() - 1].to_ascii_uppercase()
                 }
                 else {
                     break;
